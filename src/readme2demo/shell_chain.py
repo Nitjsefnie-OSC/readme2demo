@@ -16,10 +16,12 @@ refuses to guess. It recognises one shape: a chain of **simple commands**
 joined by ``&&`` / ``||`` / ``;``. Every other structure — a pipeline, a
 here-string, ``[[``, a grouping, a background ``&``, a compound command, a
 reserved-word prefix, quoting it cannot resolve — yields ``None``, and the
-caller must then emit what it emitted before this module existed. A structure
-we cannot split is one we must not act on: the rewrite has nowhere safe to put
-either edit, and guessing masks a failure the caller used to catch or drops
-tolerance the caller used to give.
+caller must then emit what it emitted before this module existed. Expansion
+delimiters are skipped recursively, including when they occur inside a double
+quoted word, so their command data can never become a top-level separator. A
+structure we cannot split is one we must not act on: the rewrite has nowhere
+safe to put either edit, and guessing masks a failure the caller used to catch
+or drops tolerance the caller used to give.
 """
 
 from __future__ import annotations
@@ -55,6 +57,29 @@ def _skip_quoted(text: str, i: int, closer: str) -> int | None:
         if escapes and text[i] == "\\":
             i += 2
             continue
+        if escapes and text[i] == "$":
+            nxt = _skip_expansion(text, i)
+            marker = text[i + 1 : i + 2]
+            if nxt is None and (
+                marker in ("(", "{", "[")
+                or (closer != '"' and marker in ("'", '"'))
+            ):
+                return None
+            if nxt is not None:
+                i = nxt
+                continue
+        if closer == '"' and text[i] == "`":
+            nxt = _skip_quoted(text, i, "`")
+            if nxt is None:
+                return None
+            i = nxt
+            continue
+        if closer == "`" and text[i] in "'\"":
+            nxt = _skip_quoted(text, i, text[i])
+            if nxt is None:
+                return None
+            i = nxt
+            continue
         if text[i] == closer:
             return i + 1
         i += 1
@@ -72,12 +97,19 @@ def _skip_balanced(text: str, i: int, opener: str, closer: str) -> int | None:
         if ch == "\\":
             i += 2
             continue
-        if ch in "'\"":
+        if ch in "'\"`":
             nxt = _skip_quoted(text, i, ch)
             if nxt is None:
                 return None
             i = nxt
             continue
+        if ch == "$":
+            nxt = _skip_expansion(text, i)
+            if nxt is None and text[i + 1 : i + 2] in ("(", "{", "[", "'", '"'):
+                return None
+            if nxt is not None:
+                i = nxt
+                continue
         if ch == opener:
             depth += 1
         elif ch == closer:
@@ -85,6 +117,22 @@ def _skip_balanced(text: str, i: int, opener: str, closer: str) -> int | None:
             if depth == 0:
                 return i + 1
         i += 1
+    return None
+
+
+def _skip_expansion(text: str, i: int) -> int | None:
+    """Index just past a shell expansion beginning at ``text[i]``."""
+    if text[i : i + 1] != "$":
+        return None
+    opener = text[i + 1 : i + 2]
+    if opener == "(":
+        return _skip_balanced(text, i + 1, "(", ")")
+    if opener == "{":
+        return _skip_balanced(text, i + 1, "{", "}")
+    if opener == "[":
+        return _skip_balanced(text, i + 1, "[", "]")
+    if opener in ("'", '"'):
+        return _skip_quoted(text, i + 1, opener)
     return None
 
 
@@ -134,17 +182,13 @@ def _split(cmd: str) -> tuple[list[tuple[int, int]], list[str], bool] | None:
                 return None
             i = nxt
             continue
-        if ch == "$" and cmd[i + 1 : i + 2] in ("(", "{", "'", '"'):
-            opener = cmd[i + 1]
-            nxt = (
-                _skip_quoted(cmd, i + 1, opener)
-                if opener in "'\""
-                else _skip_balanced(cmd, i + 1, opener, ")" if opener == "(" else "}")
-            )
-            if nxt is None:
+        if ch == "$":
+            nxt = _skip_expansion(cmd, i)
+            if nxt is None and cmd[i + 1 : i + 2] in ("(", "{", "[", "'", '"'):
                 return None
-            i = nxt
-            continue
+            if nxt is not None:
+                i = nxt
+                continue
         if ch in _FORBIDDEN:
             return None
         if ch == "[" and cmd[i + 1 : i + 2] == "[":
