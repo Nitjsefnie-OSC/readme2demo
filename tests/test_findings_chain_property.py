@@ -83,6 +83,31 @@ DECLINED_TAILS = ["{f} | cat"]
 SEPARATORS = ["&&", ";"]
 MODES = ["whole", "tail"]
 
+
+def _nested_expansion_cases() -> list[str]:
+    """Generate opaque quoted expansions containing shell-looking operators."""
+    expansions = [
+        '$(printf "%s && %s" left right)',
+        '$(printf "%s; %s" left right)',
+        '${unset:-"left && right"}',
+        '${unset:-"left; right"}',
+        '$(printf "%s && marker" x)',
+    ]
+    wrappers = [
+        'echo "{exp}"',
+        'printf "%s" "{exp}"',
+    ]
+    tails = ["r2d_findings --scan", "r2d_findings --scan --json"]
+    separators = ["&&", ";"]
+    return [
+        f'{wrapper.format(exp=exp)} {separator} {tail}'
+        for exp in expansions
+        for wrapper in wrappers
+        for separator in separators
+        for tail in tails
+    ]
+
+
 CORPUS = [
     (pkind, failing, ok, tkind, tail, sep, mode)
     for pkind, prefixes in (
@@ -215,6 +240,15 @@ def test_findings_chain_properties(
         elif aborts and (sep == ";" or splittable):
             assert rc != 0, f"(C) prefix failure masked\n{script}"
             assert not published, f"(C) a failed step was published\n{script}"
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("step", _nested_expansion_cases())
+def test_nested_expansion_is_opaque_in_rendered_findings_steps(step, mode, tmp_path):
+    """Nested expansion data must make the renderer fall back to the base."""
+    tail = re.search(r"r2d_findings --scan(?: --json)?$", step).group(0)
+    _, emitted, findings = render(step, tail, mode, tmp_path)
+    assert emitted == _base_emission(step, findings)
 
 
 @pytest.mark.parametrize("mode", MODES)
