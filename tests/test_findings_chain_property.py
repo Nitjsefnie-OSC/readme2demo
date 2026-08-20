@@ -84,14 +84,18 @@ SEPARATORS = ["&&", ";"]
 MODES = ["whole", "tail"]
 
 
-def _nested_expansion_cases() -> list[str]:
-    """Generate opaque quoted expansions containing shell-looking operators."""
+def _nested_expansion_cases() -> list[tuple[str, str]]:
+    """Generate chains whose quoted expansion data contains shell operators."""
     expansions = [
         '$(printf "%s && %s" left right)',
         '$(printf "%s; %s" left right)',
         '${unset:-"left && right"}',
         '${unset:-"left; right"}',
         '$(printf "%s && marker" x)',
+        '`printf "%s && %s" left right`',
+        '$(printf "%s" "$(printf "%s && %s" left right)")',
+        '${unset:-"$(printf "%s && %s" left right)"}',
+        '$[1 && 2]',
     ]
     wrappers = [
         'echo "{exp}"',
@@ -100,7 +104,14 @@ def _nested_expansion_cases() -> list[str]:
     tails = ["r2d_findings --scan", "r2d_findings --scan --json"]
     separators = ["&&", ";"]
     return [
-        f'{wrapper.format(exp=exp)} {separator} {tail}'
+        (
+            f'{wrapper.format(exp=exp)} {separator} {tail}',
+            (
+                f'{wrapper.format(exp=exp)} || exit $? && {{ {tail} || true; }}'
+                if separator == "&&"
+                else f'{wrapper.format(exp=exp)} ; {{ {tail} || true; }}'
+            ),
+        )
         for exp in expansions
         for wrapper in wrappers
         for separator in separators
@@ -243,12 +254,13 @@ def test_findings_chain_properties(
 
 
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("step", _nested_expansion_cases())
-def test_nested_expansion_is_opaque_in_rendered_findings_steps(step, mode, tmp_path):
-    """Nested expansion data must make the renderer fall back to the base."""
+@pytest.mark.parametrize("case", _nested_expansion_cases())
+def test_nested_expansion_is_opaque_in_rendered_findings_steps(case, mode, tmp_path):
+    """Nested expansion data stays byte-identical while the outer chain is isolated."""
+    step, expected = case
     tail = re.search(r"r2d_findings --scan(?: --json)?$", step).group(0)
     _, emitted, findings = render(step, tail, mode, tmp_path)
-    assert emitted == _base_emission(step, findings)
+    assert emitted in {expected, _base_emission(step, findings)}
 
 
 @pytest.mark.parametrize("mode", MODES)
