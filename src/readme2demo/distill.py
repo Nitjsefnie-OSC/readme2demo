@@ -29,6 +29,7 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader
 
 from readme2demo import llm
+from readme2demo.shell_chain import tolerate_chain_tail
 from readme2demo.types import CommandLog, DistillOutput, Plan, TapeCommand
 
 from readme2demo.escaping import (  # noqa: F401 — re-export, callers import from distill
@@ -354,6 +355,15 @@ def _tolerate_findings_steps(commands: list[str], log: CommandLog | None) -> lis
     script before the assertion is reached. We know which commands are
     findings-successful from the log entries `normalize.mark_findings_success`
     flagged; make exactly those tolerant. Real failures still abort.
+
+    ``|| true`` binds to a whole ``&&``/``||`` list, so on a chained step it
+    swallows every earlier segment's failure too and a broken setup step is
+    published as verified (#106). Where the step resolves into a chain of
+    simple commands, ``shell_chain`` isolates the tolerance to the final
+    segment instead. Where it does not resolve, the plain append stands: a
+    structure we cannot split is one we must not act on, and the alternatives
+    — wrapping it, or leaving it bare — respectively mask a failure this
+    append does not and drop tolerance this append does give.
     """
     if log is None:
         return commands
@@ -368,7 +378,7 @@ def _tolerate_findings_steps(commands: list[str], log: CommandLog | None) -> lis
         norm = normalize_cmd(cmd)
         last_seg = _CHAIN_SPLIT_RE.split(norm)[-1].strip()
         if (norm in findings or last_seg in findings) and "|| true" not in cmd:
-            out_lines.append(f"{cmd} || true")
+            out_lines.append(tolerate_chain_tail(cmd) or f"{cmd} || true")
         else:
             out_lines.append(cmd)
     return out_lines
